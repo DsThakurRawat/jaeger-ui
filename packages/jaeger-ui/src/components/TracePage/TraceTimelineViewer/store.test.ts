@@ -149,6 +149,7 @@ describe('trace timeline zustand stores', () => {
       sidePanelWidth: 0.375,
       detailPanelMode: 'inline',
       timelineBarsVisible: true,
+      explicitFields: {},
     });
     useTraceTimelineStore.setState({
       traceID: null,
@@ -166,7 +167,7 @@ describe('trace timeline zustand stores', () => {
       it('updates spanNameColumnWidth and persists to localStorage', () => {
         useLayoutPrefsStore.getState().setSpanNameColumnWidth(0.4);
         expect(useLayoutPrefsStore.getState().spanNameColumnWidth).toBeCloseTo(0.4);
-        expect(localStorage.getItem('spanNameColumnWidth')).toBe('0.4');
+        expect(JSON.parse(localStorage.getItem('jaeger.layout')!).state.spanNameColumnWidth).toBeCloseTo(0.4);
       });
 
       it('clamps to SPAN_NAME_COLUMN_WIDTH_MIN', () => {
@@ -200,7 +201,7 @@ describe('trace timeline zustand stores', () => {
       it('updates sidePanelWidth and persists to localStorage', () => {
         useLayoutPrefsStore.getState().setSidePanelWidth(0.4);
         expect(useLayoutPrefsStore.getState().sidePanelWidth).toBeCloseTo(0.4);
-        expect(localStorage.getItem('sidePanelWidth')).toBe('0.4');
+        expect(JSON.parse(localStorage.getItem('jaeger.layout')!).state.sidePanelWidth).toBeCloseTo(0.4);
       });
 
       it('clamps to SIDE_PANEL_WIDTH_MIN', () => {
@@ -230,13 +231,36 @@ describe('trace timeline zustand stores', () => {
       it('updates timelineBarsVisible and persists to localStorage', () => {
         useLayoutPrefsStore.getState().setTimelineBarsVisible(false);
         expect(useLayoutPrefsStore.getState().timelineBarsVisible).toBe(false);
-        expect(localStorage.getItem('timelineVisible')).toBe('false');
+        expect(JSON.parse(localStorage.getItem('jaeger.layout')!).state.timelineBarsVisible).toBe(false);
       });
 
       it('persists true as "true"', () => {
         useLayoutPrefsStore.getState().setTimelineBarsVisible(false);
         useLayoutPrefsStore.getState().setTimelineBarsVisible(true);
-        expect(localStorage.getItem('timelineVisible')).toBe('true');
+        expect(JSON.parse(localStorage.getItem('jaeger.layout')!).state.timelineBarsVisible).toBe(true);
+      });
+    });
+
+    describe('persistence and rehydration', () => {
+      it('preserves spanNameColumnWidth 0.8 across rehydrate without resetting to default', async () => {
+        useLayoutPrefsStore.getState().setSpanNameColumnWidth(0.8);
+        expect(useLayoutPrefsStore.getState().spanNameColumnWidth).toBeCloseTo(0.8);
+
+        await useLayoutPrefsStore.persist.rehydrate();
+        expect(useLayoutPrefsStore.getState().spanNameColumnWidth).toBeCloseTo(0.8);
+      });
+
+      it('only persists detailPanelMode when explicitly chosen so config default applies otherwise', async () => {
+        useLayoutPrefsStore.getState().setSpanNameColumnWidth(0.4);
+        const stored = JSON.parse(localStorage.getItem('jaeger.layout')!);
+        expect(stored.state.detailPanelMode).toBeUndefined();
+
+        vi.mocked(getConfig).mockReturnValue({
+          traceTimeline: { enableSidePanel: true, defaultDetailPanelMode: 'sidepanel' },
+        } as ReturnType<typeof getConfig>);
+
+        await useLayoutPrefsStore.persist.rehydrate();
+        expect(useLayoutPrefsStore.getState().detailPanelMode).toBe('sidepanel');
       });
     });
   });
@@ -245,7 +269,7 @@ describe('trace timeline zustand stores', () => {
     it('updates detailPanelMode and persists to localStorage', () => {
       setDetailPanelMode('sidepanel');
       expect(useLayoutPrefsStore.getState().detailPanelMode).toBe('sidepanel');
-      expect(localStorage.getItem('detailPanelMode')).toBe('sidepanel');
+      expect(JSON.parse(localStorage.getItem('jaeger.layout')!).state.detailPanelMode).toBe('sidepanel');
     });
 
     it('clamps spanNameColumnWidth when switching to sidepanel', () => {
@@ -882,10 +906,11 @@ describe('getInitialLayoutState() with storage blocked', () => {
 
   // getInitialLayoutState() seeds the zustand store when this module is imported, so a
   // throw here would take down the trace page rather than lose one layout preference.
-  it('returns the defaults when reading is blocked', () => {
+  it('returns the defaults and does not throw when reading is blocked', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new DOMException('SecurityError');
     });
+    expect(() => useLayoutPrefsStore.persist.rehydrate()).not.toThrow();
     const state = getInitialLayoutState();
     expect(state.spanNameColumnWidth).toBe(0.25);
     expect(state.timelineBarsVisible).toBe(true);

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { create } from 'zustand';
+import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import type { SpanDetailPanelMode } from '../../../types/config';
 import getConfig from '../../../utils/config/get-config';
+import storage from '../../../utils/storage';
 import {
   MIN_TIMELINE_COLUMN_WIDTH,
   SIDE_PANEL_WIDTH_MAX,
@@ -11,7 +13,6 @@ import {
   SPAN_NAME_COLUMN_WIDTH_MAX,
   SPAN_NAME_COLUMN_WIDTH_MIN,
 } from './store.constants';
-import storage from '../../../utils/storage';
 
 export function getMaxNameColumnWidth(opts: {
   detailPanelMode: string;
@@ -27,55 +28,112 @@ export function getMaxNameColumnWidth(opts: {
   return Math.min(SPAN_NAME_COLUMN_WIDTH_MAX, availableWidth);
 }
 
-type TraceTimelineLayoutPrefsStore = {
+export const STORAGE_KEY = 'jaeger.layout';
+export const STORAGE_VERSION = 1;
+
+export const LEGACY_SPAN_NAME_COLUMN_WIDTH = 'spanNameColumnWidth';
+export const LEGACY_SIDE_PANEL_WIDTH = 'sidePanelWidth';
+export const LEGACY_DETAIL_PANEL_MODE = 'detailPanelMode';
+export const LEGACY_TIMELINE_VISIBLE = 'timelineVisible';
+
+export type LayoutPrefs = {
   spanNameColumnWidth: number;
   sidePanelWidth: number;
   detailPanelMode: SpanDetailPanelMode;
   timelineBarsVisible: boolean;
+};
+
+export type ExplicitFields = {
+  spanNameColumnWidth?: boolean;
+  sidePanelWidth?: boolean;
+  detailPanelMode?: boolean;
+  timelineBarsVisible?: boolean;
+};
+
+export type TraceTimelineLayoutPrefsStore = LayoutPrefs & {
+  explicitFields: ExplicitFields;
   setSpanNameColumnWidth: (width: number) => void;
   setSidePanelWidth: (width: number) => void;
-  // Updates layout fields only; use `setDetailPanelMode` from `./store` to also sync detail panel state.
+  // Updates layout fields only; use \`setDetailPanelMode\` from \`./store\` to also sync detail panel state.
   applyDetailPanelModeToLayout: (mode: SpanDetailPanelMode) => void;
   setTimelineBarsVisible: (visible: boolean) => void;
 };
 
-// Reads user layout preferences from localStorage and merges them with config-driven defaults.
-// Mirrors the logic that was previously in TraceTimelineViewer/duck.ts `newInitialState()`.
-export function getInitialLayoutState(): Pick<
-  TraceTimelineLayoutPrefsStore,
-  'spanNameColumnWidth' | 'sidePanelWidth' | 'detailPanelMode' | 'timelineBarsVisible'
-> {
+export function readLegacyLayoutPrefs(): { prefs: Partial<LayoutPrefs>; explicit: ExplicitFields } | null {
+  const rawSpanNameColumnWidth = storage.getItem(LEGACY_SPAN_NAME_COLUMN_WIDTH);
+  const rawSidePanelWidth = storage.getItem(LEGACY_SIDE_PANEL_WIDTH);
+  const rawDetailPanelMode = storage.getItem(LEGACY_DETAIL_PANEL_MODE);
+  const rawTimelineVisible = storage.getItem(LEGACY_TIMELINE_VISIBLE);
+
+  if (
+    rawSpanNameColumnWidth === null &&
+    rawSidePanelWidth === null &&
+    rawDetailPanelMode === null &&
+    rawTimelineVisible === null
+  ) {
+    return null;
+  }
+
+  const prefs: Partial<LayoutPrefs> = {};
+  const explicit: ExplicitFields = {};
+
+  const parsedSpanName = parseFloat(rawSpanNameColumnWidth ?? '');
+  if (!Number.isNaN(parsedSpanName)) {
+    prefs.spanNameColumnWidth = parsedSpanName;
+    explicit.spanNameColumnWidth = true;
+  }
+
+  const parsedSidePanel = parseFloat(rawSidePanelWidth ?? '');
+  if (!Number.isNaN(parsedSidePanel)) {
+    prefs.sidePanelWidth = parsedSidePanel;
+    explicit.sidePanelWidth = true;
+  }
+
+  if (rawDetailPanelMode === 'sidepanel' || rawDetailPanelMode === 'inline') {
+    prefs.detailPanelMode = rawDetailPanelMode;
+    explicit.detailPanelMode = true;
+  }
+
+  if (rawTimelineVisible !== null) {
+    prefs.timelineBarsVisible = rawTimelineVisible !== 'false';
+    explicit.timelineBarsVisible = true;
+  }
+
+  return { prefs, explicit };
+}
+
+export function normalizeLayoutPrefs(
+  stored: Partial<LayoutPrefs>,
+  explicit: ExplicitFields = {}
+): LayoutPrefs {
   const { traceTimeline } = getConfig();
 
   let detailPanelMode: SpanDetailPanelMode = 'inline';
   if (traceTimeline?.enableSidePanel) {
-    const stored = storage.getItem('detailPanelMode');
-    if (stored === 'sidepanel') {
+    if (stored.detailPanelMode === 'sidepanel') {
       detailPanelMode = 'sidepanel';
-    } else if (traceTimeline.defaultDetailPanelMode === 'sidepanel' && stored === null) {
+    } else if (traceTimeline.defaultDetailPanelMode === 'sidepanel' && stored.detailPanelMode === undefined) {
       detailPanelMode = 'sidepanel';
     }
   }
 
-  // localStorage key kept as 'timelineVisible' for backward compatibility with stored user preferences.
-  const storedTimelineVisible = storage.getItem('timelineVisible');
-  const timelineBarsVisible = storedTimelineVisible === null ? true : storedTimelineVisible !== 'false';
+  const timelineBarsVisible = stored.timelineBarsVisible ?? true;
 
-  const parsedSpanNameColumnWidth = parseFloat(storage.getItem('spanNameColumnWidth') ?? '');
-  let spanNameColumnWidth = Number.isNaN(parsedSpanNameColumnWidth)
-    ? 0.25
-    : Math.min(Math.max(parsedSpanNameColumnWidth, SPAN_NAME_COLUMN_WIDTH_MIN), SPAN_NAME_COLUMN_WIDTH_MAX);
+  let spanNameColumnWidth =
+    stored.spanNameColumnWidth === undefined
+      ? 0.25
+      : Math.min(
+          Math.max(stored.spanNameColumnWidth, SPAN_NAME_COLUMN_WIDTH_MIN),
+          SPAN_NAME_COLUMN_WIDTH_MAX
+        );
 
-  const parsedSidePanelWidth = parseFloat(storage.getItem('sidePanelWidth') ?? '');
-  const sidePanelWidthExplicit = !Number.isNaN(parsedSidePanelWidth);
-  const rawSidePanelWidth = sidePanelWidthExplicit ? parsedSidePanelWidth : (1 - spanNameColumnWidth) / 2;
+  const sidePanelWidthExplicit = explicit.sidePanelWidth ?? stored.sidePanelWidth !== undefined;
+  const rawSidePanelWidth =
+    sidePanelWidthExplicit && stored.sidePanelWidth !== undefined
+      ? stored.sidePanelWidth
+      : (1 - spanNameColumnWidth) / 2;
   let sidePanelWidth = Math.min(Math.max(rawSidePanelWidth, SIDE_PANEL_WIDTH_MIN), SIDE_PANEL_WIDTH_MAX);
 
-  // The two stored widths must leave room for the timeline column.
-  // Only applies when sidePanelWidth was explicitly stored (not derived from spanNameColumnWidth),
-  // since the default formula always produces a consistent value before clamping.
-  // First try resetting only sidePanelWidth. If spanNameColumnWidth is so large that even the
-  // minimum side-panel width leaves no room (sum still >= 1), reset both to defaults.
   if (sidePanelWidthExplicit && spanNameColumnWidth + sidePanelWidth >= 1) {
     sidePanelWidth = Math.min(
       Math.max((1 - spanNameColumnWidth) / 2, SIDE_PANEL_WIDTH_MIN),
@@ -86,7 +144,7 @@ export function getInitialLayoutState(): Pick<
       sidePanelWidth = (1 - spanNameColumnWidth) / 2;
     }
   }
-  // in side-panel mode the timeline column must also have MIN_TIMELINE_COLUMN_WIDTH.
+
   if (
     detailPanelMode === 'sidepanel' &&
     spanNameColumnWidth + sidePanelWidth > 1 - MIN_TIMELINE_COLUMN_WIDTH
@@ -104,40 +162,154 @@ export function getInitialLayoutState(): Pick<
   return { spanNameColumnWidth, sidePanelWidth, detailPanelMode, timelineBarsVisible };
 }
 
-export const useLayoutPrefsStore = create<TraceTimelineLayoutPrefsStore>()((set, get) => ({
-  ...getInitialLayoutState(),
-
-  setSpanNameColumnWidth: (width: number) => {
-    const { detailPanelMode, sidePanelWidth, timelineBarsVisible } = get();
-    const maxWidth = getMaxNameColumnWidth({ detailPanelMode, sidePanelWidth, timelineBarsVisible });
-    const spanNameColumnWidth = Math.min(Math.max(width, SPAN_NAME_COLUMN_WIDTH_MIN), maxWidth);
-    storage.setItem('spanNameColumnWidth', spanNameColumnWidth.toString());
-    set({ spanNameColumnWidth });
-  },
-
-  setSidePanelWidth: (width: number) => {
-    const { timelineBarsVisible, spanNameColumnWidth } = get();
-    const availableWidth = timelineBarsVisible
-      ? 1 - spanNameColumnWidth - MIN_TIMELINE_COLUMN_WIDTH
-      : 1 - spanNameColumnWidth;
-    const maxWidth = Math.max(SIDE_PANEL_WIDTH_MIN, Math.min(SIDE_PANEL_WIDTH_MAX, availableWidth));
-    const sidePanelWidth = Math.min(Math.max(width, SIDE_PANEL_WIDTH_MIN), maxWidth);
-    storage.setItem('sidePanelWidth', sidePanelWidth.toString());
-    set({ sidePanelWidth });
-  },
-
-  applyDetailPanelModeToLayout: (mode: SpanDetailPanelMode) => {
-    storage.setItem('detailPanelMode', mode);
-    let { spanNameColumnWidth, sidePanelWidth, timelineBarsVisible } = get();
-    if (mode === 'sidepanel') {
-      const maxWidth = getMaxNameColumnWidth({ detailPanelMode: mode, sidePanelWidth, timelineBarsVisible });
-      spanNameColumnWidth = Math.min(spanNameColumnWidth, maxWidth);
+export function getInitialLayoutState(): LayoutPrefs & { explicitFields: ExplicitFields } {
+  const raw = storage.getItem(STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as StorageValue<
+        Partial<LayoutPrefs> & { explicitFields?: ExplicitFields }
+      >;
+      const stateObj = parsed.state ?? {};
+      const explicit: ExplicitFields = stateObj.explicitFields ?? {
+        spanNameColumnWidth: stateObj.spanNameColumnWidth !== undefined,
+        sidePanelWidth: stateObj.sidePanelWidth !== undefined,
+        detailPanelMode: stateObj.detailPanelMode !== undefined,
+        timelineBarsVisible: stateObj.timelineBarsVisible !== undefined,
+      };
+      return { ...normalizeLayoutPrefs(stateObj, explicit), explicitFields: explicit };
+    } catch {
+      // Corrupted value: ignore and check legacy keys
     }
-    set({ detailPanelMode: mode, spanNameColumnWidth });
-  },
+  }
+  const legacy = readLegacyLayoutPrefs();
+  if (legacy) {
+    return { ...normalizeLayoutPrefs(legacy.prefs, legacy.explicit), explicitFields: legacy.explicit };
+  }
+  return { ...normalizeLayoutPrefs({}), explicitFields: {} };
+}
 
-  setTimelineBarsVisible: (visible: boolean) => {
-    storage.setItem('timelineVisible', String(visible));
-    set({ timelineBarsVisible: visible });
+export const layoutPrefsStorage: PersistStorage<TraceTimelineLayoutPrefsStore> = {
+  getItem: name => {
+    const raw = storage.getItem(name);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as StorageValue<
+          Partial<LayoutPrefs> & { explicitFields?: ExplicitFields }
+        >;
+        const stateObj = parsed.state ?? {};
+        const explicit: ExplicitFields = stateObj.explicitFields ?? {
+          spanNameColumnWidth: stateObj.spanNameColumnWidth !== undefined,
+          sidePanelWidth: stateObj.sidePanelWidth !== undefined,
+          detailPanelMode: stateObj.detailPanelMode !== undefined,
+          timelineBarsVisible: stateObj.timelineBarsVisible !== undefined,
+        };
+        const normalized = normalizeLayoutPrefs(stateObj, explicit);
+        return {
+          state: {
+            ...normalized,
+            explicitFields: explicit,
+          } as TraceTimelineLayoutPrefsStore,
+          version: parsed.version,
+        };
+      } catch {
+        storage.removeItem(name);
+      }
+    }
+    const legacy = readLegacyLayoutPrefs();
+    if (legacy) {
+      const normalized = normalizeLayoutPrefs(legacy.prefs, legacy.explicit);
+      return {
+        state: {
+          ...normalized,
+          explicitFields: legacy.explicit,
+        } as TraceTimelineLayoutPrefsStore,
+        version: 0,
+      };
+    }
+    return null;
   },
-}));
+  setItem: (name, value) => {
+    storage.setItem(name, JSON.stringify(value));
+  },
+  removeItem: name => {
+    storage.removeItem(name);
+  },
+};
+
+export const useLayoutPrefsStore = create<TraceTimelineLayoutPrefsStore>()(
+  persist(
+    (set, get) => ({
+      ...getInitialLayoutState(),
+
+      setSpanNameColumnWidth: (width: number) => {
+        const { detailPanelMode, sidePanelWidth, timelineBarsVisible } = get();
+        const maxWidth = getMaxNameColumnWidth({ detailPanelMode, sidePanelWidth, timelineBarsVisible });
+        const spanNameColumnWidth = Math.min(Math.max(width, SPAN_NAME_COLUMN_WIDTH_MIN), maxWidth);
+        set(state => ({
+          spanNameColumnWidth,
+          explicitFields: { ...state.explicitFields, spanNameColumnWidth: true },
+        }));
+      },
+
+      setSidePanelWidth: (width: number) => {
+        const { timelineBarsVisible, spanNameColumnWidth } = get();
+        const availableWidth = timelineBarsVisible
+          ? 1 - spanNameColumnWidth - MIN_TIMELINE_COLUMN_WIDTH
+          : 1 - spanNameColumnWidth;
+        const maxWidth = Math.max(SIDE_PANEL_WIDTH_MIN, Math.min(SIDE_PANEL_WIDTH_MAX, availableWidth));
+        const sidePanelWidth = Math.min(Math.max(width, SIDE_PANEL_WIDTH_MIN), maxWidth);
+        set(state => ({
+          sidePanelWidth,
+          explicitFields: { ...state.explicitFields, sidePanelWidth: true },
+        }));
+      },
+
+      applyDetailPanelModeToLayout: (mode: SpanDetailPanelMode) => {
+        let { spanNameColumnWidth, sidePanelWidth, timelineBarsVisible } = get();
+        if (mode === 'sidepanel') {
+          const maxWidth = getMaxNameColumnWidth({
+            detailPanelMode: mode,
+            sidePanelWidth,
+            timelineBarsVisible,
+          });
+          spanNameColumnWidth = Math.min(spanNameColumnWidth, maxWidth);
+        }
+        set(state => ({
+          detailPanelMode: mode,
+          spanNameColumnWidth,
+          explicitFields: { ...state.explicitFields, detailPanelMode: true },
+        }));
+      },
+
+      setTimelineBarsVisible: (visible: boolean) => {
+        set(state => ({
+          timelineBarsVisible: visible,
+          explicitFields: { ...state.explicitFields, timelineBarsVisible: true },
+        }));
+      },
+    }),
+    {
+      name: STORAGE_KEY,
+      version: STORAGE_VERSION,
+      storage: layoutPrefsStorage,
+      partialize: state => {
+        const persisted: Partial<LayoutPrefs> & { explicitFields: ExplicitFields } = {
+          explicitFields: state.explicitFields,
+        };
+        if (state.explicitFields?.spanNameColumnWidth) {
+          persisted.spanNameColumnWidth = state.spanNameColumnWidth;
+        }
+        if (state.explicitFields?.sidePanelWidth) {
+          persisted.sidePanelWidth = state.sidePanelWidth;
+        }
+        if (state.explicitFields?.detailPanelMode) {
+          persisted.detailPanelMode = state.detailPanelMode;
+        }
+        if (state.explicitFields?.timelineBarsVisible) {
+          persisted.timelineBarsVisible = state.timelineBarsVisible;
+        }
+        return persisted as unknown as TraceTimelineLayoutPrefsStore;
+      },
+    }
+  )
+);
