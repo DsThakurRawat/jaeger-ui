@@ -7,13 +7,14 @@ import { MemoryRouter } from 'react-router-dom';
 import '@testing-library/jest-dom';
 
 import { UnconnectedSearchResults as SearchResults, SelectSort } from '.';
-import { useSearchResultsStore } from '../store.search-results';
+import { useSearchResultsStore } from './store.search-results';
 import * as track from './index.track';
-import * as orderBy from '../../../model/order-by';
+import * as orderBy from './order-by';
 import { getUrl } from '../url';
 import ResultItem from './ResultItem';
 import ScatterPlot from './ScatterPlot';
 import DiffSelection from './DiffSelection';
+import * as getConfigModule from '../../../utils/config/get-config';
 
 const mockNavigate = jest.fn();
 vi.mock('react-router-dom', async () => {
@@ -135,8 +136,6 @@ const baseProps = {
   traceSummaries: baseTraces,
   uploadedTraceIDs: new Set(),
   rawTraces: baseRawTraces,
-  sortBy: orderBy.MOST_RECENT,
-  handleSortChange: jest.fn(),
 };
 
 // to wrap component with Router context (for use in rerender)
@@ -148,15 +147,33 @@ const renderWithRouter = (ui, options = {}) => {
 };
 
 describe('<SearchResults>', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('shows the "no results" message when the search result is empty', () => {
     renderWithRouter(<SearchResults {...baseProps} traceSummaries={[]} />);
     expect(screen.getByText(/No trace results\. Try another query\./i)).toBeInTheDocument();
   });
 
   it('uses default skipMessage value when not provided', () => {
-    const { skipMessage, ...propsWithoutSkipMessage } = baseProps;
+    const { skipMessage: _unused, ...propsWithoutSkipMessage } = baseProps;
     renderWithRouter(<SearchResults {...propsWithoutSkipMessage} traceSummaries={[]} />);
     expect(screen.getByText(/No trace results\. Try another query\./i)).toBeInTheDocument();
+  });
+
+  it('renders the lowercase trace count and the search latency', () => {
+    renderWithRouter(<SearchResults {...baseProps} searchLatency={2_500_000} />);
+    const count = screen.getByText(/2 traces/);
+    expect(count).toHaveTextContent('2 traces (in 2.5s)');
+    expect(screen.getByText(/\(in 2\.5s\)/)).toBeInTheDocument();
+  });
+
+  it('renders the count without latency when searchLatency is absent', () => {
+    renderWithRouter(<SearchResults {...baseProps} />);
+    const count = screen.getByText(/2 traces/);
+    expect(count).toBeInTheDocument();
+    expect(count).not.toHaveTextContent('(in');
   });
 
   it('shows a loading indicator if loading traces', () => {
@@ -339,6 +356,10 @@ describe('<SearchResults>', () => {
   });
 
   describe('search finished with results', () => {
+    beforeEach(() => {
+      useSearchResultsStore.setState({ viewMode: 'list' });
+    });
+
     it('shows a scatter plot', () => {
       renderWithRouter(<SearchResults {...baseProps} />);
       expect(screen.getByTestId('scatterplot')).toBeInTheDocument();
@@ -364,16 +385,16 @@ describe('<SearchResults>', () => {
       expect(second[0].linkTo.search).toBeUndefined();
     });
 
-    it('deep links traces with leading 0', () => {
+    it('deep links traces using exact ID match (opaque strings)', () => {
       const uiFind0 = 'ui-find-0';
       const uiFind1 = 'ui-find-1';
       const traceID0 = '00traceID0';
-      const traceID1 = 'traceID1';
+      const traceID1 = '000traceID1';
       const spanLinks = {
         [traceID0]: uiFind0,
         [traceID1]: uiFind1,
       };
-      const zeroIDTraces = [
+      const traces = [
         {
           traceID: traceID0,
           traceName: traceID0,
@@ -387,8 +408,8 @@ describe('<SearchResults>', () => {
           services: [],
         },
         {
-          traceID: `000${traceID1}`,
-          traceName: `000${traceID1}`,
+          traceID: traceID1,
+          traceName: traceID1,
           rootServiceName: '',
           rootOperationName: '',
           startTime: 0,
@@ -399,7 +420,7 @@ describe('<SearchResults>', () => {
           services: [],
         },
       ];
-      renderWithRouter(<SearchResults {...baseProps} traceSummaries={zeroIDTraces} spanLinks={spanLinks} />);
+      renderWithRouter(<SearchResults {...baseProps} traceSummaries={traces} spanLinks={spanLinks} />);
       const calls = ResultItem.mock.calls;
       expect(calls[0][0].linkTo.search).toBe(`uiFind=${uiFind0}`);
       expect(calls[1][0].linkTo.search).toBe(`uiFind=${uiFind1}`);
@@ -507,11 +528,43 @@ describe('<SearchResults>', () => {
     });
   });
 
+  describe('sort integration', () => {
+    const distinctTraces = [
+      { ...baseTraces[0], traceID: 'short', duration: 100 },
+      { ...baseTraces[1], traceID: 'long', duration: 5000 },
+    ];
+
+    beforeEach(() => {
+      useSearchResultsStore.setState({ viewMode: 'list', sortBy: orderBy.MOST_RECENT });
+    });
+
+    it('reads sortBy from the store and sorts unsorted traceSummaries internally', () => {
+      renderWithRouter(<SearchResults {...baseProps} traceSummaries={distinctTraces} />);
+      const items = screen.getAllByTestId(/^result-/);
+      expect(items[0]).toHaveAttribute('data-testid', 'result-short');
+      expect(items[1]).toHaveAttribute('data-testid', 'result-long');
+    });
+
+    it('re-sorts the rendered results when the sort dropdown changes', () => {
+      renderWithRouter(<SearchResults {...baseProps} traceSummaries={distinctTraces} />);
+
+      fireEvent.change(screen.getByTestId('searchable-select'), {
+        target: { value: orderBy.LONGEST_FIRST },
+      });
+
+      const items = screen.getAllByTestId(/^result-/);
+      expect(items[0]).toHaveAttribute('data-testid', 'result-long');
+      expect(items[1]).toHaveAttribute('data-testid', 'result-short');
+      expect(useSearchResultsStore.getState().sortBy).toBe(orderBy.LONGEST_FIRST);
+    });
+  });
+
   describe('showStandaloneLink', () => {
-    it('renders Link when showStandaloneLink is true', () => {
+    it('renders Link with accessible aria-label when showStandaloneLink is true', () => {
       renderWithRouter(<SearchResults {...baseProps} showStandaloneLink />);
-      const link = screen.getByRole('link');
+      const link = screen.getByRole('link', { name: 'Open search results in a new window' });
       expect(link).toBeInTheDocument();
+      expect(link).toHaveAttribute('aria-label', 'Open search results in a new window');
       expect(screen.getByTestId('new-window-icon')).toBeInTheDocument();
     });
 
@@ -520,33 +573,43 @@ describe('<SearchResults>', () => {
       expect(screen.queryByRole('link')).not.toBeInTheDocument();
       expect(screen.queryByTestId('new-window-icon')).not.toBeInTheDocument();
     });
+
+    it('renders Link with accessible aria-label without "in a new window" when forbidNewPage is true', () => {
+      vi.spyOn(getConfigModule, 'default').mockReturnValue({ forbidNewPage: true });
+      renderWithRouter(<SearchResults {...baseProps} showStandaloneLink />);
+      const link = screen.getByRole('link', { name: 'Open search results' });
+      expect(link).toBeInTheDocument();
+      expect(link).toHaveAttribute('aria-label', 'Open search results');
+      expect(link).toHaveAttribute('target', '');
+      expect(screen.getByTestId('new-window-icon')).toBeInTheDocument();
+    });
   });
 
   describe('view mode toggle', () => {
     beforeEach(() => {
-      useSearchResultsStore.setState({ viewMode: 'list' });
       localStorage.clear();
+      useSearchResultsStore.setState(useSearchResultsStore.getInitialState());
     });
 
-    it('defaults to list view', () => {
+    it('defaults to table view', () => {
       renderWithRouter(<SearchResults {...baseProps} />);
-      expect(screen.getByTestId('result-a')).toBeInTheDocument();
-      expect(screen.queryByTestId('trace-table')).not.toBeInTheDocument();
-    });
-
-    it('switches to table view when Table button is clicked', () => {
-      renderWithRouter(<SearchResults {...baseProps} />);
-      fireEvent.click(screen.getByText('Table'));
       expect(screen.getByTestId('trace-table')).toBeInTheDocument();
       expect(screen.queryByTestId('result-a')).not.toBeInTheDocument();
     });
 
-    it('switches back to list view when List button is clicked', () => {
+    it('switches to list view when List button is clicked', () => {
       renderWithRouter(<SearchResults {...baseProps} />);
-      fireEvent.click(screen.getByText('Table'));
       fireEvent.click(screen.getByText('List'));
       expect(screen.getByTestId('result-a')).toBeInTheDocument();
       expect(screen.queryByTestId('trace-table')).not.toBeInTheDocument();
+    });
+
+    it('switches back to table view when Table button is clicked', () => {
+      renderWithRouter(<SearchResults {...baseProps} />);
+      fireEvent.click(screen.getByText('List'));
+      fireEvent.click(screen.getByText('Table'));
+      expect(screen.getByTestId('trace-table')).toBeInTheDocument();
+      expect(screen.queryByTestId('result-a')).not.toBeInTheDocument();
     });
   });
 });

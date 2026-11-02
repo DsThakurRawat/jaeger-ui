@@ -14,7 +14,7 @@ export {
   SPAN_NAME_COLUMN_WIDTH_MIN,
 } from './store.constants';
 
-export { normalizeLayoutPrefs, useLayoutPrefsStore } from './store.layout';
+export { getInitialLayoutState, normalizeLayoutPrefs, useLayoutPrefsStore } from './store.layout';
 
 export { useTraceTimelineStore } from './store.timeline';
 

@@ -5,6 +5,7 @@ import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import type { SpanDetailPanelMode } from '../../../types/config';
 import getConfig from '../../../utils/config/get-config';
+import storage from '../../../utils/storage';
 import {
   MIN_TIMELINE_COLUMN_WIDTH,
   SIDE_PANEL_WIDTH_MAX,
@@ -13,40 +14,56 @@ import {
   SPAN_NAME_COLUMN_WIDTH_MIN,
 } from './store.constants';
 
-// The persisted slice of the store: the four user layout preferences (no actions).
-type LayoutPrefs = {
+export function getMaxNameColumnWidth(opts: {
+  detailPanelMode: string;
+  timelineBarsVisible: boolean;
+  sidePanelWidth: number;
+}): number {
+  if (opts.detailPanelMode !== 'sidepanel') {
+    return SPAN_NAME_COLUMN_WIDTH_MAX;
+  }
+  const availableWidth = opts.timelineBarsVisible
+    ? 1 - opts.sidePanelWidth - MIN_TIMELINE_COLUMN_WIDTH
+    : 1 - SIDE_PANEL_WIDTH_MIN;
+  return Math.min(SPAN_NAME_COLUMN_WIDTH_MAX, availableWidth);
+}
+
+export const STORAGE_KEY = 'jaeger.layout';
+export const STORAGE_VERSION = 1;
+
+export const LEGACY_SPAN_NAME_COLUMN_WIDTH = 'spanNameColumnWidth';
+export const LEGACY_SIDE_PANEL_WIDTH = 'sidePanelWidth';
+export const LEGACY_DETAIL_PANEL_MODE = 'detailPanelMode';
+export const LEGACY_TIMELINE_VISIBLE = 'timelineVisible';
+
+export type LayoutPrefs = {
   spanNameColumnWidth: number;
   sidePanelWidth: number;
   detailPanelMode: SpanDetailPanelMode;
   timelineBarsVisible: boolean;
 };
 
-type TraceTimelineLayoutPrefsStore = LayoutPrefs & {
+export type ExplicitFields = {
+  spanNameColumnWidth?: boolean;
+  sidePanelWidth?: boolean;
+  detailPanelMode?: boolean;
+  timelineBarsVisible?: boolean;
+};
+
+export type TraceTimelineLayoutPrefsStore = LayoutPrefs & {
+  explicitFields: ExplicitFields;
   setSpanNameColumnWidth: (width: number) => void;
   setSidePanelWidth: (width: number) => void;
-  // Updates layout fields only; use `setDetailPanelMode` from `./store` to also sync detail panel state.
+  // Updates layout fields only; use \`setDetailPanelMode\` from \`./store\` to also sync detail panel state.
   applyDetailPanelModeToLayout: (mode: SpanDetailPanelMode) => void;
   setTimelineBarsVisible: (visible: boolean) => void;
 };
 
-// Single namespaced localStorage key holding the JSON-serialized prefs (replaces the four raw keys).
-const STORAGE_KEY = 'jaeger.layout';
-const STORAGE_VERSION = 1;
-
-// Legacy unprefixed keys written by the pre-Zustand-persist implementation (and still by duck.ts).
-// localStorage key 'timelineVisible' is kept as-is for backward compatibility with stored preferences.
-const LEGACY_SPAN_NAME_COLUMN_WIDTH = 'spanNameColumnWidth';
-const LEGACY_SIDE_PANEL_WIDTH = 'sidePanelWidth';
-const LEGACY_DETAIL_PANEL_MODE = 'detailPanelMode';
-const LEGACY_TIMELINE_VISIBLE = 'timelineVisible';
-
-// Reads the legacy unprefixed keys into a partial LayoutPrefs, or returns null when none are present.
-// Used as a one-time fallback on first load before the namespaced key exists.
-function readLegacyLayoutPrefs(): Partial<LayoutPrefs> | null {
-  const rawSpanNameColumnWidth = localStorage.getItem(LEGACY_SPAN_NAME_COLUMN_WIDTH);
-  const rawSidePanelWidth = localStorage.getItem(LEGACY_SIDE_PANEL_WIDTH);
-  const rawDetailPanelMode = localStorage.getItem(LEGACY_DETAIL_PANEL_MODE);
-  const rawTimelineVisible = localStorage.getItem(LEGACY_TIMELINE_VISIBLE);
+export function readLegacyLayoutPrefs(): { prefs: Partial<LayoutPrefs>; explicit: ExplicitFields } | null {
+  const rawSpanNameColumnWidth = storage.getItem(LEGACY_SPAN_NAME_COLUMN_WIDTH);
+  const rawSidePanelWidth = storage.getItem(LEGACY_SIDE_PANEL_WIDTH);
+  const rawDetailPanelMode = storage.getItem(LEGACY_DETAIL_PANEL_MODE);
+  const rawTimelineVisible = storage.getItem(LEGACY_TIMELINE_VISIBLE);
 
   if (
     rawSpanNameColumnWidth === null &&
@@ -58,30 +75,37 @@ function readLegacyLayoutPrefs(): Partial<LayoutPrefs> | null {
   }
 
   const prefs: Partial<LayoutPrefs> = {};
-  const parsedSpanNameColumnWidth = parseFloat(rawSpanNameColumnWidth ?? '');
-  if (!Number.isNaN(parsedSpanNameColumnWidth)) {
-    prefs.spanNameColumnWidth = parsedSpanNameColumnWidth;
+  const explicit: ExplicitFields = {};
+
+  const parsedSpanName = parseFloat(rawSpanNameColumnWidth ?? '');
+  if (!Number.isNaN(parsedSpanName)) {
+    prefs.spanNameColumnWidth = parsedSpanName;
+    explicit.spanNameColumnWidth = true;
   }
-  const parsedSidePanelWidth = parseFloat(rawSidePanelWidth ?? '');
-  if (!Number.isNaN(parsedSidePanelWidth)) {
-    prefs.sidePanelWidth = parsedSidePanelWidth;
+
+  const parsedSidePanel = parseFloat(rawSidePanelWidth ?? '');
+  if (!Number.isNaN(parsedSidePanel)) {
+    prefs.sidePanelWidth = parsedSidePanel;
+    explicit.sidePanelWidth = true;
   }
+
   if (rawDetailPanelMode === 'sidepanel' || rawDetailPanelMode === 'inline') {
     prefs.detailPanelMode = rawDetailPanelMode;
+    explicit.detailPanelMode = true;
   }
+
   if (rawTimelineVisible !== null) {
     prefs.timelineBarsVisible = rawTimelineVisible !== 'false';
+    explicit.timelineBarsVisible = true;
   }
-  return prefs;
+
+  return { prefs, explicit };
 }
 
-// Applies config-driven defaults and clamps the stored prefs into a consistent layout.
-// Mirrors the bootstrapping logic that previously lived in `getInitialLayoutState()`/duck `newInitialState()`,
-// but operates on already-typed values instead of reading localStorage directly. It is invoked exactly once
-// per load inside `layoutPrefsStorage.getItem` (and for the store's initial state); persist then applies its
-// default shallow merge. Do not also normalize in a custom `merge`: the width-budget reset is not idempotent,
-// so a stale/oversized stored width must be reconciled exactly once.
-function normalizeLayoutPrefs(stored: Partial<LayoutPrefs>): LayoutPrefs {
+export function normalizeLayoutPrefs(
+  stored: Partial<LayoutPrefs>,
+  explicit: ExplicitFields = {}
+): LayoutPrefs {
   const { traceTimeline } = getConfig();
 
   let detailPanelMode: SpanDetailPanelMode = 'inline';
@@ -103,15 +127,13 @@ function normalizeLayoutPrefs(stored: Partial<LayoutPrefs>): LayoutPrefs {
           SPAN_NAME_COLUMN_WIDTH_MAX
         );
 
-  const sidePanelWidthExplicit = stored.sidePanelWidth !== undefined;
-  const rawSidePanelWidth = sidePanelWidthExplicit ? stored.sidePanelWidth! : (1 - spanNameColumnWidth) / 2;
+  const sidePanelWidthExplicit = explicit.sidePanelWidth ?? stored.sidePanelWidth !== undefined;
+  const rawSidePanelWidth =
+    sidePanelWidthExplicit && stored.sidePanelWidth !== undefined
+      ? stored.sidePanelWidth
+      : (1 - spanNameColumnWidth) / 2;
   let sidePanelWidth = Math.min(Math.max(rawSidePanelWidth, SIDE_PANEL_WIDTH_MIN), SIDE_PANEL_WIDTH_MAX);
 
-  // The two stored widths must leave room for the timeline column.
-  // Only applies when sidePanelWidth was explicitly stored (not derived from spanNameColumnWidth),
-  // since the default formula always produces a consistent value before clamping.
-  // First try resetting only sidePanelWidth. If spanNameColumnWidth is so large that even the
-  // minimum side-panel width leaves no room (sum still >= 1), reset both to defaults.
   if (sidePanelWidthExplicit && spanNameColumnWidth + sidePanelWidth >= 1) {
     sidePanelWidth = Math.min(
       Math.max((1 - spanNameColumnWidth) / 2, SIDE_PANEL_WIDTH_MIN),
@@ -122,7 +144,7 @@ function normalizeLayoutPrefs(stored: Partial<LayoutPrefs>): LayoutPrefs {
       sidePanelWidth = (1 - spanNameColumnWidth) / 2;
     }
   }
-  // in side-panel mode the timeline column must also have MIN_TIMELINE_COLUMN_WIDTH.
+
   if (
     detailPanelMode === 'sidepanel' &&
     spanNameColumnWidth + sidePanelWidth > 1 - MIN_TIMELINE_COLUMN_WIDTH
@@ -140,53 +162,93 @@ function normalizeLayoutPrefs(stored: Partial<LayoutPrefs>): LayoutPrefs {
   return { spanNameColumnWidth, sidePanelWidth, detailPanelMode, timelineBarsVisible };
 }
 
-// Storage adapter that reads/writes the namespaced JSON key and, on first load (before that key exists),
-// transparently falls back to the legacy unprefixed keys. The legacy keys are intentionally left in place:
-// the not-yet-removed Redux `duck.ts` still reads them in `newInitialState()`.
-//
-// Normalization (config defaults + clamping) happens here, exactly once per load, so the returned `state`
-// is always a complete, consistent LayoutPrefs. This intentionally bypasses persist's version/migrate
-// machinery — `normalizeLayoutPrefs` is the single reconciliation step — so callers must not normalize
-// again in `merge` (double-normalization is not idempotent for the width-budget reset).
-const layoutPrefsStorage: PersistStorage<LayoutPrefs> = {
+export function getInitialLayoutState(): LayoutPrefs & { explicitFields: ExplicitFields } {
+  const raw = storage.getItem(STORAGE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as StorageValue<
+        Partial<LayoutPrefs> & { explicitFields?: ExplicitFields }
+      >;
+      const stateObj = parsed.state ?? {};
+      const explicit: ExplicitFields = stateObj.explicitFields ?? {
+        spanNameColumnWidth: stateObj.spanNameColumnWidth !== undefined,
+        sidePanelWidth: stateObj.sidePanelWidth !== undefined,
+        detailPanelMode: stateObj.detailPanelMode !== undefined,
+        timelineBarsVisible: stateObj.timelineBarsVisible !== undefined,
+      };
+      return { ...normalizeLayoutPrefs(stateObj, explicit), explicitFields: explicit };
+    } catch {
+      // Corrupted value: ignore and check legacy keys
+    }
+  }
+  const legacy = readLegacyLayoutPrefs();
+  if (legacy) {
+    return { ...normalizeLayoutPrefs(legacy.prefs, legacy.explicit), explicitFields: legacy.explicit };
+  }
+  return { ...normalizeLayoutPrefs({}), explicitFields: {} };
+}
+
+export const layoutPrefsStorage: PersistStorage<TraceTimelineLayoutPrefsStore> = {
   getItem: name => {
-    const raw = localStorage.getItem(name);
+    const raw = storage.getItem(name);
     if (raw) {
       try {
-        const parsed = JSON.parse(raw) as StorageValue<Partial<LayoutPrefs>>;
-        return { state: normalizeLayoutPrefs(parsed.state ?? {}), version: STORAGE_VERSION };
+        const parsed = JSON.parse(raw) as StorageValue<
+          Partial<LayoutPrefs> & { explicitFields?: ExplicitFields }
+        >;
+        const stateObj = parsed.state ?? {};
+        const explicit: ExplicitFields = stateObj.explicitFields ?? {
+          spanNameColumnWidth: stateObj.spanNameColumnWidth !== undefined,
+          sidePanelWidth: stateObj.sidePanelWidth !== undefined,
+          detailPanelMode: stateObj.detailPanelMode !== undefined,
+          timelineBarsVisible: stateObj.timelineBarsVisible !== undefined,
+        };
+        const normalized = normalizeLayoutPrefs(stateObj, explicit);
+        return {
+          state: {
+            ...normalized,
+            explicitFields: explicit,
+          } as TraceTimelineLayoutPrefsStore,
+          version: parsed.version,
+        };
       } catch {
-        // Corrupted / partially-written value: drop it and fall back to legacy keys so the page still loads.
-        localStorage.removeItem(name);
+        storage.removeItem(name);
       }
     }
     const legacy = readLegacyLayoutPrefs();
     if (legacy) {
-      return { state: normalizeLayoutPrefs(legacy), version: STORAGE_VERSION };
+      const normalized = normalizeLayoutPrefs(legacy.prefs, legacy.explicit);
+      return {
+        state: {
+          ...normalized,
+          explicitFields: legacy.explicit,
+        } as TraceTimelineLayoutPrefsStore,
+        version: 0,
+      };
     }
     return null;
   },
   setItem: (name, value) => {
-    localStorage.setItem(name, JSON.stringify(value));
+    storage.setItem(name, JSON.stringify(value));
   },
   removeItem: name => {
-    localStorage.removeItem(name);
+    storage.removeItem(name);
   },
 };
 
 export const useLayoutPrefsStore = create<TraceTimelineLayoutPrefsStore>()(
   persist(
     (set, get) => ({
-      ...normalizeLayoutPrefs({}),
+      ...getInitialLayoutState(),
 
       setSpanNameColumnWidth: (width: number) => {
-        const { detailPanelMode, sidePanelWidth } = get();
-        const maxWidth =
-          detailPanelMode === 'sidepanel'
-            ? Math.min(SPAN_NAME_COLUMN_WIDTH_MAX, 1 - sidePanelWidth - MIN_TIMELINE_COLUMN_WIDTH)
-            : SPAN_NAME_COLUMN_WIDTH_MAX;
+        const { detailPanelMode, sidePanelWidth, timelineBarsVisible } = get();
+        const maxWidth = getMaxNameColumnWidth({ detailPanelMode, sidePanelWidth, timelineBarsVisible });
         const spanNameColumnWidth = Math.min(Math.max(width, SPAN_NAME_COLUMN_WIDTH_MIN), maxWidth);
-        set({ spanNameColumnWidth });
+        set(state => ({
+          spanNameColumnWidth,
+          explicitFields: { ...state.explicitFields, spanNameColumnWidth: true },
+        }));
       },
 
       setSidePanelWidth: (width: number) => {
@@ -196,40 +258,58 @@ export const useLayoutPrefsStore = create<TraceTimelineLayoutPrefsStore>()(
           : 1 - spanNameColumnWidth;
         const maxWidth = Math.max(SIDE_PANEL_WIDTH_MIN, Math.min(SIDE_PANEL_WIDTH_MAX, availableWidth));
         const sidePanelWidth = Math.min(Math.max(width, SIDE_PANEL_WIDTH_MIN), maxWidth);
-        set({ sidePanelWidth });
+        set(state => ({
+          sidePanelWidth,
+          explicitFields: { ...state.explicitFields, sidePanelWidth: true },
+        }));
       },
 
       applyDetailPanelModeToLayout: (mode: SpanDetailPanelMode) => {
-        let { spanNameColumnWidth, sidePanelWidth } = get();
+        let { spanNameColumnWidth, sidePanelWidth, timelineBarsVisible } = get();
         if (mode === 'sidepanel') {
-          const maxWidth = Math.min(
-            SPAN_NAME_COLUMN_WIDTH_MAX,
-            1 - sidePanelWidth - MIN_TIMELINE_COLUMN_WIDTH
-          );
+          const maxWidth = getMaxNameColumnWidth({
+            detailPanelMode: mode,
+            sidePanelWidth,
+            timelineBarsVisible,
+          });
           spanNameColumnWidth = Math.min(spanNameColumnWidth, maxWidth);
         }
-        set({ detailPanelMode: mode, spanNameColumnWidth });
+        set(state => ({
+          detailPanelMode: mode,
+          spanNameColumnWidth,
+          explicitFields: { ...state.explicitFields, detailPanelMode: true },
+        }));
       },
 
       setTimelineBarsVisible: (visible: boolean) => {
-        set({ timelineBarsVisible: visible });
+        set(state => ({
+          timelineBarsVisible: visible,
+          explicitFields: { ...state.explicitFields, timelineBarsVisible: true },
+        }));
       },
     }),
     {
       name: STORAGE_KEY,
       version: STORAGE_VERSION,
       storage: layoutPrefsStorage,
-      // Persist only the data fields, never the action functions.
-      partialize: state => ({
-        spanNameColumnWidth: state.spanNameColumnWidth,
-        sidePanelWidth: state.sidePanelWidth,
-        detailPanelMode: state.detailPanelMode,
-        timelineBarsVisible: state.timelineBarsVisible,
-      }),
-      // No custom `merge`: the storage adapter already returns a fully-normalized state, so persist's
-      // default shallow merge ({ ...current, ...persisted }) correctly overlays the four prefs.
+      partialize: state => {
+        const persisted: Partial<LayoutPrefs> & { explicitFields: ExplicitFields } = {
+          explicitFields: state.explicitFields,
+        };
+        if (state.explicitFields?.spanNameColumnWidth) {
+          persisted.spanNameColumnWidth = state.spanNameColumnWidth;
+        }
+        if (state.explicitFields?.sidePanelWidth) {
+          persisted.sidePanelWidth = state.sidePanelWidth;
+        }
+        if (state.explicitFields?.detailPanelMode) {
+          persisted.detailPanelMode = state.detailPanelMode;
+        }
+        if (state.explicitFields?.timelineBarsVisible) {
+          persisted.timelineBarsVisible = state.timelineBarsVisible;
+        }
+        return persisted as unknown as TraceTimelineLayoutPrefsStore;
+      },
     }
   )
 );
-
-export { normalizeLayoutPrefs };
